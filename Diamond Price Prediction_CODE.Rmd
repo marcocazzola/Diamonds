@@ -1,0 +1,698 @@
+---
+title: "Diamond Price Prediction"
+author: "Marco Cazzola"
+date: "Matr: 964573"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(GoodmanKruskal)
+library(ggpubr)
+library(boot)
+library(leaps)
+library(car)
+library(gridExtra)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+```
+
+# Abstract
+
+In this paper, we are going to apply parametric and non-parametric learning algorithm to the `diamonds` data set (attached to the `ggplot2` package) to predict the diamonds' price according to their characteristics. 
+
+# Data definition
+
+The data set consists of 53940 rows and 10 columns, representing observations and variables respectively. 
+More precisely, the available variables are: 
+
+* `price`: price of the diamond in US dollars. This will be the target variable of the analysis. 
+* `carat`: weight of the diamonds (1 carat = 0.2 grams)
+* `cut`: quality of the cut (Fair, Good, Very Good, Premium, Ideal)
+* `color`: diamond color, from D (best) to J (worst)
+* `clarity`: a measurement of how clear the diamond is (I1 (worst), SI2, SI1, VS2, VS1, VVS2, VVS1, IF (best))
+* `x`: length of the diamond, in mm
+* `y`: width of the diamond, in mm
+* `z`: depth of the diamond, in mm
+* `depth`: depth of the diamond expressed relatively to the other two dimensions (`depth =  z / mean(x, y)`) 
+* `table`: width of top of diamond relative to widest point. 
+
+# Data summary
+
+First of all, let's check if there is any NULL or NA value in the data set. 
+
+```{r}
+any(is.na(diamonds))
+```
+
+Luckily, this is not the case. Let's then have a look at the data summary: 
+
+```{r}
+summary(diamonds)
+```
+
+The price ranges between 326 USD and 18.823 USD; however, most of the observations are below the level of 5.000 USD. 
+Also `carat` shows a similar pattern, with most of observations being below the level of 1 carat, while the maximum is 5.01. `depth` and `table` seem to be more fairly distributed, even though `table` shows a rather extreme maximum value: let's keep that in mind for the moment. 
+Proceeding in the analysis, we notice some inconsistency in the dimension measurements: some diamonds have zero length, width and/or depth. Since the carat is not null for those diamonds, these zeros probably denote missing values. We therefore replace them with NA. 
+Another thing we notice is that, while the maximum value for `x` is around 11, `y` and `z` show quite large maximum values. To investigate the possibility these are outliers, let's see how many observations have a value larger than 11 either for `y` or for `z`, and how many diamonds have a `table` value larger than 80. 
+
+```{r}
+diamonds %>% filter(y > 11 | z > 11 | table > 80)
+```
+
+Over almost 54.000 observations, just 4 of them show such large levels of `y`, `z` or `table`; in other words, these are probably typos. Since those four examples represent a very negligible part of our data set, we drop them. 
+Moving along with the categorical variables, most of the diamonds in the data set show an ideal cut, and also high-quality color diamonds are more frequent than low-quality color ones. However, diamonds with of best clarity class are very rare. 
+
+```{r}
+dta <- data.frame(diamonds)
+dta$color <- ordered(dta$color, levels=rev(LETTERS[4:10]))
+#Replacing 0s with NAs
+dta$x <- na_if(dta$x, 0)
+dta$y <- na_if(dta$y, 0)
+dta$z <- na_if(dta$z, 0)
+#Removing the four outliers
+dta <- dta[-which(dta$z > 11 | dta$y > 11 | dta$table > 80),]
+```
+
+# Descriptive statistics
+
+##### Target variable.
+
+Our target variable is definitely not normally distributed, and the boxplot shows a very large number of outliers. We decide to keep all the observations for the moment, since those high levels of prices could be justified by some premium characteristics of the diamonds. 
+
+```{r, fig.height=4}
+targ <- ggplot(dta, aes(price)) + 
+  geom_histogram(aes(y=..density..), bins=30,
+                 colour="black", fill="white") + 
+  geom_density(alpha=.2, fill="#FF6666")
+
+targ.box <- ggplot(dta, aes(y=price)) + geom_boxplot() + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+grid.arrange(targ, targ.box, ncol=2)
+```
+
+##### Quantitative regressors.
+
+The dimensionality variables (`x`, `y` and `z`) show a very similar pattern to `carat`, which measures weight: not surprisingly, weight and dimensions are probably correlated and they have both a strong and positive correlation with price. `depth` and `table` instead seem to have no relation with price.
+
+```{r, warning=FALSE, fig.height=4}
+p1 <- ggplot(dta, aes(carat, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+p2 <- ggplot(dta, aes(depth, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+p3 <- ggplot(dta, aes(table, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+p4 <- ggplot(dta, aes(x, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+p5 <- ggplot(dta, aes(y, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+p6 <- ggplot(dta, aes(z, price)) +
+  geom_point(aes(color=price)) +
+  theme(legend.position = 'none')
+
+grid.arrange(p1,p2,p3,p4,p5,p6, nrow=2)
+```
+
+For what concerns the distributions, notice how the distribution of `carat` is similar to the one of `price`. `depth` and `table` are quasi-normal (especially `depth`), while `x`, `y` and `z` are more uniformly distributed.
+
+```{r, warning=FALSE, fig.height=3.5}
+d1 <- ggplot(dta, aes(carat)) + 
+  geom_histogram(aes(y=..density..), bins=15,
+                 colour="black", fill="white") 
+
+d2 <- ggplot(dta, aes(depth)) + 
+  geom_histogram(aes(y=..density..), bins=15,
+                 colour="black", fill="white")
+
+d3 <- ggplot(dta, aes(table)) + 
+  geom_histogram(aes(y=..density..), bins=15,
+                 colour="black", fill="white")
+
+d4 <- ggplot(dta, aes(x)) + 
+  geom_histogram(aes(y=..density..), bins=20,
+                 colour="black", fill="white") 
+
+d5 <- ggplot(dta, aes(y)) + 
+  geom_histogram(aes(y=..density..), bins=20,
+                 colour="black", fill="white") 
+
+d6 <- ggplot(dta, aes(z)) + 
+  geom_histogram(aes(y=..density..), bins=20,
+                 colour="black", fill="white") 
+
+grid.arrange(d1,d2,d3,d4,d5,d6, nrow=2)
+```
+
+##### Qualitative regressors.
+
+None of the categorical predictor alone seems to be able to tell us something about the price variability: even outliers are fairly distributed among classes. For what concerns the distributions, most of the diamonds in the data set present an ideal cut; `clarity` is almost normally distributed, similarly to `color`.
+
+```{r, fig.height=4}
+p7 <- ggplot(dta, aes(x=cut, y=price)) +
+  geom_boxplot()
+d7 <- ggplot(dta, aes(x=cut)) + geom_bar(fill='steelblue')
+
+p8 <- ggplot(dta, aes(x=color, y=price)) +
+  geom_boxplot() 
+d8 <- ggplot(dta, aes(x=color)) + geom_bar(fill='steelblue')
+
+p9 <- ggplot(dta, aes(x=clarity, y=price)) +
+  geom_boxplot() 
+d9 <- ggplot(dta, aes(x=clarity)) + geom_bar(fill='steelblue') 
+
+grid.arrange(p7,d7,p8,d8,p9,d9, ncol=2)
+```
+
+# Collinearity checks
+
+If two regressors are correlated, including both of them adds no information but variability to the model, resulting in an overall worst performance. That is why it is important to check correlation among the features, displayed below through the correlation matrix. 
+
+```{r, fig.height=3, fig.width=6}
+cor(na.omit(dta[,sapply(dta, is.numeric)])) %>%
+  corrplot(type="upper",method='number',tl.col="black",tl.srt=45)
+```
+
+As guessed in the previous analysis, `x`, `y`, `z` and `carat` are extremely correlated: they basically carry the same information. However, `carat` is the most strongly correlated with `price` among the four, and that is why we keep it and drop the others. Moreover, recall that there were some `NA` values in `x`, `y` and `z`, while `carat`'s column is complete. The other regressors do not show any correlation, but `depth` and `table` are very poorly correlated with our target, as shown in the graphical analysis. 
+
+In the following, we will use Goodman and Kruskal tau index to measure the strength of association between our categorical variables, which cannot be computed through 'standard' correlation. Reassuringly, the plot tells us there is no association between the categorical variables, which means each of them carries independent information from the others and it is therefore worth including in the model. 
+
+```{r, fig.height=3, fig.width=6}
+plot(GKtauDataframe(dta[,sapply(dta, is.factor)]))
+```
+
+# Simple linear regression
+
+Since we have a feature which is strongly correlated with our target, it is worth fitting a simple linear regression, where we can also visualize the model in a nice bi-dimensional plot. After a 70-30 split between training and test set, we perform OLS on the training set and obtain the following regression of `price` on `carat`: 
+
+```{r}
+set.seed(123)
+train <- sample(1:nrow(dta), nrow(dta)*0.7)
+simple.lin <- lm(price ~ carat, dta, subset = train)
+print(summary(simple.lin))
+print(paste('RMSE on the training set:', round(sqrt(mean((residuals(simple.lin))^2)),3)))
+```
+
+First of all, we notice all the coefficients are extremely significant, with a p-value which is basically zero. Despite the simplicity, the model performs pretty good on the test set, with a $R^2$ of approximately 85% and a RMSE of 1550 USD. This means we are able to explain 85% of the variability of diamonds' price using just their carat; moreover, the model predicts the diamonds' price with an average error of 1550 USD in the training set. The fact that both the response and the predictor are in levels allows for a nice interpretation of the coefficient, that is the effect of a one-unit increase in carat leads (on average) to an increase of 7775.72 USD in the diamond's price. 
+Let's now visualize the model in the bi-dimensional space defined by the response and the predictor.
+
+```{r}
+lims <- range(dta$carat)
+grid <- seq(from=lims[1],to=lims[2], length=1500)
+preds <- predict(simple.lin,list(carat=grid))
+plot(dta$carat,dta$price,col="darkgrey", xlab='Carat', ylab='Price')
+lines(grid,preds,lwd=2,col="blue")
+```
+
+This plot makes clear why visualization is so important: even though the number shown in the summary model looked pretty good, the plots highlights the fact that we are totally missing the target after the level of 3 carats because, while the line keeps increasing, there is not much difference between the price of a 3-carat diamond and a 5-carat one. Notice this happens even though there were several training observations above the level of 3 carats. 
+From the descriptive statistics, we know both `carat` and `price` have a left-skewed distribution, so taking logarithm may help in getting better performances. We therefore fit a new regression, this time considering log-transformed variables. The resulting model's summary is shown below. 
+
+```{r}
+simple.lin <- lm(log(price) ~ log(carat), dta, subset = train)
+print(summary(simple.lin))
+print(paste('MSE on the training set:', round(mean((residuals(simple.lin))^2),5)))
+```
+
+Indeed, significant improvements were achieved. The $R^2$ statistic is now 93%, and the training MSE is 0.069 (RMSE = 0.26). Clearly, this is a log-scaled MSE, so it is not comparable with the one of the previous model; however, the fact that the response now varies between 5.78 and 9.84 suggests that we have obtained a slightly better model, also in terms of training RMSE. Still, all the coefficients are strongly significant. Finally, this simple model yields again a nice interpretation: according to this log-regression, an increase of 1% in carat causes an increase of 1.67% in the diamond's price.
+We now show the model in the bi-dimensional space, just like we did before. 
+
+```{r}
+preds <- predict(simple.lin,list(carat=grid))
+plot(log(dta$carat),log(dta$price),col="darkgrey", xlab='LogCarat', ylab='LogPrice')
+lines(log(grid),preds,lwd=2,col="blue")
+```
+
+We are still missing the observations with extreme values for our predictor. However, the fact we reduced the target variation range led to a significant improvement in the model. Also visually, the relationship between the predictor and the response looks more linear. Let's now turn to the diagnostic of the model. 
+
+```{r, fig.height=7}
+par(mfrow=c(2,2))
+plot(simple.lin)
+```
+
+The `Residuals vs Fitted` graph highlights that there is still some pattern left in the residuals, especially for large values of our target, that are systematically overestimated by the model. This trend is even more evident in the `Residuals vs Leverage` plot. These issues are probably due to the simplicity of the *linear* model. The `Scale-Location` plot is quite reassuring for what concerns the homoskedasticity assumption, while the Q-Q plot does not seem very clear. We therefore plot the residuals' distribution together with the normal distribution to assess residuals' normality. 
+
+```{r, fig.height=4}
+simple.lin.res <- log(dta$price) - predict(simple.lin, dta[,-7])
+
+ggdensity(simple.lin.res, fill = 'lightgray') +
+  stat_overlay_normal_density(color = "red", linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype="dashed", color='blue') + xlab('Residuals')
+```
+
+Normality assumption for the errors seems to be met by the model. Finally, we assess how the model performs on an independent test set. 
+
+```{r}
+simple.lin.mse <- mean((log(dta$price[-train]) - predict(simple.lin, dta[-train,]))^2)
+print(paste('MSE on the test set:', round(simple.lin.mse,5)))
+```
+
+The test MSE is basically the same as its training counterpart. 
+
+\newpage
+
+# Simple ploynomial regression
+
+We now relax the linearity assumption of traditional OLS by introducing as new predictors polynomial transformations of our original regressor. First of all, we use cross validation to select the optimal degree of the polynomial to be fitted. 
+
+```{r}
+cv.err.p <- NULL
+for (i in 1:5) {
+  glm.fit <- glm(log(price) ~ poly(log(carat),i), dta, family = 'gaussian')
+  cv.err.p[i] <- cv.glm(dta, glm.fit, K=10)$delta[1]
+}
+
+plot(cv.err.p, type='b', xlab='Polynomial Degree', ylab='CV MSE')
+```
+
+A third-degree polynomial seems to be the optimal choice, since while there is a sharp decrease in the cv MSE estimate between the second and the third degree, there is not much improvements when going beyond three. 
+We therefore estimate the model regressing the logarithm of `price` on the cubic orthogonal polynomial of the logarithm of `carat`.  
+
+```{r}
+simple.p3 <- lm(log(price) ~ poly(log(carat),3), dta, subset=train)
+summary(simple.p3)
+print(paste('MSE on the training set:',  round(mean((residuals(simple.p3))^2),5)))
+```
+
+Even though the squared term is not significant, we keep it because we include in the model the cubic one, which is of higher order. Notice the performance slightly improves, both in terms of $R^2$ and in terms of training MSE. Let's now visualize the model to see if, with the cubic fit, we are able to get better predictions for high-carat diamonds, which the simple linear model completely missed. 
+
+```{r}
+preds <- predict(simple.p3,list(carat=grid),se=TRUE)
+se.bands <- cbind(preds$fit+2*preds$se,preds$fit-2*preds$se)
+plot(log(dta$carat),log(dta$price),col="darkgrey", xlab='LogCarat', ylab='LogPrice')
+lines(log(grid),preds$fit,lwd=2,col="blue")
+matlines(log(grid),se.bands,col="blue",lty=2)
+```
+
+The cubic curve fits definitely better the data, especially at the boundaries of `carat`. Moreover, the confidence intervals do not go wild at the boundaries, as it often happens for polynomial regression, so we would say this is an overall better regression than the linear one. Let's now check the model's diagnostic. 
+
+```{r, fig.height=7}
+par(mfrow=c(2,2))
+plot(simple.p3)
+```
+
+The `Residuals vs Fitted` plot highlights the fact that, differently from before, there is no pattern left in the residuals. The model deals well also with high-leverage points, as shown by the `Residuals vs Leverage` plot, but still makes quite large errors. Again, the `Scale-Location` plot indicates that the homoskedasticity assumption is met, and also the Q-Q plot is reassuring about errors' normality. To make a proper comparison with the simple linear model of before, we look at the performance of the current model on an independent test set. 
+
+```{r}
+simple.p3.mse <- mean((log(dta$price[-train]) - predict(simple.p3, dta[-train,]))^2)
+print(paste('MSE on the test set:', round(simple.p3.mse,5)))
+```
+
+Including the squared and the cubic term in the regression led to a reduction in the test MSE of about 4.4%.  
+
+# Multiple Linear Regression
+
+We now introduce in the model other predictors which may be relevant to further increase the prediction accuracy of our simple model. For the moment, we will start from a multiple *linear* regression, therefore including no polynomial transformations of the variables. First thing to do is to perform feature selection, so that we are sure to include in our model only relevant predictors. We proceed in this task using best subset selection, selecting the optimal model according to the Schwartz's Information Criterion, whose values for different numbers of variables are plotted below. 
+
+```{r}
+#Dummy variables 
+contrasts(dta$cut) <- contr.treatment(5)
+contrasts(dta$color) <- contr.treatment(7)
+contrasts(dta$clarity) <- contr.treatment(8)
+
+#Perform best subset selection
+lin.sel <- regsubsets(log(price) ~ log(carat) + log(table) + log(depth) + 
+                        cut + clarity + color,dta,nvmax = 20)
+#Plot the results
+plot(summary(lin.sel)$bic,xlab="Number of Variables",ylab="BIC")
+points(which.min(summary(lin.sel)$bic),summary(lin.sel)$bic[which.min(summary(lin.sel)$bic)],pch=20, col="red")
+```
+
+The BIC is suggesting us to use 18 variables. These are:
+
+```{r}
+coef(lin.sel,which.min(summary(lin.sel)$bic))
+```
+
+As we expected from the descriptive statistics, `table` and `depth` are excluded from the model as irrelevant predictors. We therefore proceed in estimating a linear model with all the categorical variables and the logarithm of `carat` as predictors. 
+
+```{r}
+lin.reg <- lm(log(price) ~ log(carat) + 
+                + cut + clarity + color, dta, subset=train)
+summary(lin.reg)
+print(paste('MSE on the training set:', round(mean((residuals(lin.reg))^2),5)))
+```
+
+Notice how *all* the regression's coefficients are extremely significant, while `carat`'s coefficient has slightly increased: according to this model, a 1% increase in carat leads to a 1.88% increase in price, *keeping all the other factors fixed*. For what regards the categorical variables, notice how all the coefficients are positive; not only that, but they are strictly increasing as we move through the classes of each variable. That is because these variables are ordered from the worst level (baseline) to the best, and as we go towards the best quality cut (or clarity or color) diamonds, the price increases. Among the categorical variables, the coefficients with the largest magnitude are the ones of `clarity`: holding everything else constant, with respect to the baseline specification (lower-quality clarity) the best-quality clarity diamond has a price which is expected to be $e^{1.11}-1$ $\sim$ $2$ times larger. 
+Finally, the $R^2$ is significantly higher than the one of the simple models and has reached the very large value of 98% on the training set. Also the training MSE is much smaller than before, meaning that introducing the categorical variable had a substantial positive effect on the model accuracy. 
+This may looks surprising, since according to the descriptive statistics the categorical variables seemed to carry no information about the response. In order to better understand the role played by these qualitative predictors, we plot the relationship between `price`, `carat` and `clarity`; however, each of the other two categorical predictors showed similar graphical results.  
+
+```{r}
+ggplot(dta, aes(x=log(carat), y=log(price), color=clarity)) +
+  geom_point() + theme(legend.position = 'bottom') + scale_colour_brewer(palette="Set1")
+```
+
+Basically, the categorical variables let us capture the price variability which could not be explained by `carat`. In fact, given a certain level of `carat`, notice how low-clarity diamonds (I1 class - red points) are on the lower part of the price range, while high-clarity diamonds (IF class- pink points) are on the upper bound. In the middle, colors are ordered symmetrically to the legend, where classes are ordered. Indeed, the current model predicts the diamond's price using a straight line always with the same slope, but with different intercept depending on the categorical variables' value of the considered diamond. 
+
+Let's now turn to the model diagnostic. Since we are in a multiple linear regression setting, it is better to check the Variance Inflation Factors to adequately check for multicollinearity. 
+
+```{r}
+vif(lin.reg)
+```
+
+The values of the VIF are very close to 1 (which is the minimum possible value) for all the predictors, and also after taking the square roots, all the values are well far from the threshold of 2, meaning that all our predictors carry independent information from one another. We now turn to the diagnostic checks used also in the other simple settings.
+
+```{r, fig.height=7}
+par(mfrow=c(2,2))
+plot(lin.reg)
+```
+
+The `Residuals vs Fitted` plot is pretty similar to the one of the simple linear regression, highlighting once again that the linear model is not suitable in predicting small and large level of price. The `Scale-Location` plot shows a little trend, but overall the errors seem to show a constant variance. For what concerns the `Residuals vs Leverage` plot, the vast majority of the observations lie within the interval of $\pm$ 3 standardized residuals. There are also many outliers, but we do not feel like removing them, since those large residuals may be due to the simplicity of the linear model. Indeed, the `Normal Q-Q` plot shows very large residuals for some observations, but overall it seems like the normality assumption on the error terms is met, as confirmed by the plot below. 
+
+```{r, fig.height=4, warning=FALSE}
+lin.reg.res <- log(dta$price) - predict(lin.reg, dta)
+ggdensity(lin.reg.res, fill = 'lightgray') +
+  stat_overlay_normal_density(color = "red", linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype="dashed", color='blue')
+```
+
+Finally, let's take a look at the performance of the model on an independent test set. 
+
+```{r, warning=FALSE}
+lin.reg.mse <- mean((log(dta$price[-train]) - predict(lin.reg, dta[-train,]))^2)
+print(paste('MSE on the test set:', round(lin.reg.mse, 5)))
+```
+
+Performances on the test set and on the training set are very similar; in both cases, the test MSE is approximately 4 times smaller than the one obtained with the simplest models. 
+
+\newpage
+
+# Multiple Polynomial Regression
+
+In the previous paragraph, we saw `table` and `depth` are completely irrelevant for predicting our target variable. Since this hypothesis has a strong evidence also in the descriptive statistics, we will ignore those two variables in this last parametric model. Therefore, we will estimate a multiple polynomial regression composed of the orthogonal cubic polynomial of `log(carat)` plus the categorical variables. The resulting model's summary is shown below. 
+
+```{r}
+p3 <- lm(log(price) ~ poly(log(carat),3) + 
+                cut + clarity + color, dta, subset=train)
+summary(p3)
+print(paste('MSE on the training set:', round(mean((residuals(p3))^2),5)))
+```
+
+Once again, including the qualitative predictors led to an improvement: the adjusted $R^2$ increased by 0.2%, while the training MSE decreased by 10%. All the coefficients are extremely significant; the ones of the qualitative predictors are basically the same as they were in the multiple linear regression, so the interpretation does not change. We can therefore turn to the diagnostic of the model. 
+
+```{r, fig.height=7}
+par(mfrow=c(2,2))
+plot(p3)
+```
+
+The `Scale-Location` plot is fine for what concerns homoskedasticity. The `Residuals vs Fitted` plot shows that there is no pattern left in the residuals; however, even the most complex model so far does not behave well at the boundaries of `price`, even though the trend is less pronounced than in linear models. The `Residuals vs Leverage` plot, as the Q-Q plot, shows that for few observations we have some very large residuals: since we are dealing with a very large data set, it is possible to observe (relatively) few large errors. However, as shown in the plot below, the normality assumption of the residuals holds.
+
+```{r, fig.height=4, warning=FALSE}
+p3.res <- log(dta$price) - predict(p3, dta[,-7])
+ggdensity(p3.res, fill = 'lightgray') +
+  stat_overlay_normal_density(color = "red", linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype="dashed", color='blue')
+```
+
+Finally, let's take a look at the performance of the model on an independent test set. 
+
+```{r, warning=FALSE}
+p3.mse <- mean((log(dta$price[-train]) - predict(p3, dta[-train,-7]))^2)
+print(paste('MSE on the test set:', round(p3.mse, 5)))
+```
+
+The test MSE is the lowest obtained so far, suggesting that the multiple polynomial regression is the best parametric approach among the four. 
+
+\newpage 
+
+# Regression tree
+
+We now turn to non-parametric methods which, differently from before, make no assumption about the form of the relationship between the response and the predictors. We will start considering just a simple tree, which is the most interpretable approach among the non-parametric tree-based methods. What the tree predictor actually does, is to split the predictors' space into different region, and then predict a new observation using the mean of the response of the training observations belonging to the region in which the new observation falls. The splitting rules can be easily represented through a tree, hence this is where the name of this class of models come from. 
+We therefore apply the recursive binary splitting to build a tree using observations from the same training set used for parametric methods. The resulting tree is plotted below. 
+
+
+```{r, warning=FALSE}
+diamond.tree <- rpart(price ~ ., dta, subset=train)
+rpart.plot(diamond.tree, box.palette = 'BuGn')
+print("Variables importance:")
+print(round(diamond.tree$variable.importance/(10^9),2))
+```
+
+The tree is quite simple, and so is the interpretation. As one could expect, diamonds whose carat is less than 1 and whose width is less than 5.5 mm, get the lower price prediction (1058 USD). On the contrary, diamonds whose carat is more than 1 and whose width is more than 7.8 mm have the higher price prediction, around 15000 USD. The importance measures confirm once again the idea that the most relevant factors in determining a diamond's price are its weight (measured by `carat`) and its dimensions (`x`, `y` and `z`). Finally, also `clarity` (which was the categorical variable with the largest magnitude in the parametric models) plays a relevant role according to the tree. `table` and `depth` are once again not relevant in price prediction. 
+Let's now take a closer look at the performance of the tree in the training set. 
+
+```{r, warning=FALSE}
+#Define a function to compute the Rsq
+R2 <- function(df, mod, train) {
+  RSS <- sum((df[train, 'price'] - predict(mod, df[train, ]))^2)
+  TSS <- sum((df[train, 'price'] - mean(df[train, 'price']))^2)
+  return(1 - (RSS/TSS))
+}
+
+tree.R2 <- R2(dta, diamond.tree, train)
+print(paste("Pseudo R-squared:", tree.R2))
+print(paste("Training RMSE:", sqrt(mean(residuals(diamond.tree)^2))))
+```
+
+The performances are comparable with our first simple linear regression model: the tree is able to explain 88% of price variability [^1] and predicts the diamonds' price with an average error of 1378 USD on the training set.
+
+If we ignore the node related to `clarity`, we can plot the partition defined by the tree in the bi-dimensional space given by `carat` and `y`, which we rename width. 
+
+```{r}
+ggplot(data=NULL, aes(x=1:11, y=1:5)) + 
+  scale_y_continuous(name='Carat', breaks=1:5, labels=as.character(1:5), limits=c(0,6)) +
+  scale_x_continuous(name='Width', breaks=c(1:4,5.5,7.2,7.8,9,10), labels=as.character(c(1:4,5.5,7.2,7.8,9,10)), limits=c(0,11)) +
+  theme_classic() + geom_hline(aes(yintercept=1), linetype='dashed') + ggtitle('Predictors space partition') +
+  geom_segment(aes(x = 5.5, y = -Inf, xend = 5.5, yend = 1), linetype='dashed') + 
+  geom_segment(aes(x = 7.2, y = 1, xend = 7.2, yend = Inf), linetype='dashed') +
+  geom_segment(aes(x = 7.8, y = 1, xend = 7.8, yend = Inf), linetype='dashed') +
+  annotate("rect",xmin=-Inf, xmax=5.5, ymin=-Inf, ymax=1, alpha=0.5, fill="#8dd3c7") +
+  annotate("rect",xmin=5.5, xmax=Inf, ymin=-Inf, ymax=1, alpha=0.5, fill="#ffffb3") + 
+  annotate("rect",xmin=-Inf, xmax=7.2, ymin=1, ymax=Inf, alpha=0.5, fill="#bebada") + 
+  annotate("rect",xmin=7.2, xmax=7.8, ymin=1, ymax=Inf, alpha=0.5, fill="#fb8072") + 
+  annotate("rect",xmin=7.8, xmax=Inf, ymin=1, ymax=Inf, alpha=0.5, fill="#fdb462") +
+  annotate("label", x=2.6, y=0.4, label="1.058") +
+  annotate("label", x=8.5, y=0.4, label="3.074") +
+  annotate("label", x=3.5, y=3.5, label="6.139") +
+  annotate("label", x=7.5, y=3.5, label="11.000") +
+  annotate("label", x=9.5, y=3.5, label="15.000")
+```
+
+Notice how the lower-left rectangle is showing the lowest level of price, while the top-right rectangle has the largest prediction for price. Let's now see how the model behaves on an independent test set. 
+
+```{r, warning=FALSE}
+diamond.tree.rmse <- sqrt(mean((dta[-train, 'price'] - predict(diamond.tree, dta[-train, ]))^2))
+print(paste("Test RMSE:", diamond.tree.rmse))
+```
+
+The test error made by the tree is slightly greater than its training counterpart. More precisely, the tree predicts the diamond's price with an average error of 1386 USD on the test set. Let's see if by applying ensemble methods we can get better prediction accuracy. 
+
+[^1]: The Pseudo $R^2$ is computed as 1 - RSS/TSS. Even though this may not be a proper metric for a regression tree, it was computed to gain some intuition about the explanatory power of the model and compare it with the one of the parametric regressions.  
+
+\newpage
+
+# Bagging
+
+We have seen tree's prediction accuracy is not so good; moreover, trees suffer from high variability: if we had grown another tree on a different training set, we would have obtained a rather different partition of the features space. A first step towards a more stable and a better-performing model is to consider an *ensemble* of trees, rather than a single one. Indeed, bagging involves growing B different trees on B randomly bootstrapped versions of the original training set, and then take the average of the single predictions. The bootstrapped training sets have the same size as the original one; it can be proven that each bootstrapped training set contains on average only 2/3 of the observations of the original data set. The remaining 1/3 observations are also known as *out-of-bag* (OOB) observations. Since these observations are not used for training purposes, we can use them to test the model and obtain a reliable estimate of the test error. We use OOB MSE estimate to select a reasonable number of trees for our bagged forest. 
+
+```{r bagLoop}
+bag.OOB.err <- NULL
+j <- 1
+dta <- na.omit(dta)
+
+#### WARNING ####
+#VERY LONG LOOP!#
+
+for (i in seq(from=50, to=250, by=20)) {
+  set.seed(123)
+  bag <- randomForest(price ~ ., dta, mtry=9, ntree=i)
+  bag.OOB.err[j] <- mean((bag$predicted-dta[names(bag$predicted),'price'])^2)
+  j <- j+1
+}
+
+plot(seq(from=50, to=250, by=20), bag.OOB.err, type='b', 
+     xlab='Number of trees', ylab='OOB MSE')
+```
+
+The elbow of the curve is around 150 trees; after that level we see some improvement, but this is mainly an effect of the scale on the vertical axis. The stabilization after 150 trees is even more evident if we consider the RMSE rather than the MSE. 
+
+```{r}
+names(bag.OOB.err) <- seq(from=50, to=250, by=20)
+
+sqrt(bag.OOB.err)
+```
+
+We therefore grow a forest of 150 bagged trees. Some information about the model performance on the training set are shown below. 
+
+```{r}
+set.seed(123)
+train <- sample(1:nrow(dta), nrow(dta)*0.7) 
+
+set.seed(123)
+bag <- randomForest(price ~ ., dta[train,], mtry=9, ntree=150, importance=TRUE)
+
+bag.R2 <- R2(dta, bag, train)
+print(paste('Pseudo R-squared:', bag.R2))
+print(paste('Training RMSE:', sqrt(mean((dta[train, 'price'] - predict(bag, dta[train,]))^2))))
+```
+
+The $R^2$ on the training set is extremely high, almost reaching the maximum value of 1. Also the training RMSE is very low: on the training set, the bagged forest predicts the diamonds' price with an average error of 238 USD. This is a very good performance, considering that diamonds' price variation is very wide. Although bagged forests are not as interpretable as single trees, the prediction accuracy is much better, and we can still count on some measures of variables importance. The following plot shows such measures in our case: each split involves a variable, and for each split we can compute the reduction in RSS associated to it. Since in our case the RSS is of the order of tens of thousands, we normalized the importance of each variable so that they sum up to 100 to have more readable numbers. 
+
+```{r}
+bag.importance <- as.data.frame(importance(bag))
+bag.importance$NormIncNodePurity <- (bag.importance$IncNodePurity/sum(bag.importance$IncNodePurity))*100
+
+ggplot(bag.importance,aes(x=reorder(rownames(bag.importance),NormIncNodePurity),y=NormIncNodePurity)) + 
+  geom_bar(stat="identity", fill="red",color="black") +
+  geom_text(aes(label=round(NormIncNodePurity,digits=2)), 
+            hjust=1, color="white", size=3) +
+  theme_minimal() + xlab("Variables") + coord_flip()
+```
+
+`carat` is once again the most important variable, as highlighted in all the models so far. The first and the second variable in terms of importance were included in the single tree model as well. After `color`, variables' importance become negligible. Coherent with the parametric models, `depth` and `table` are not really important, while, differently from before, `cut` is the least important variable. 
+
+```{r}
+bag.rmse <- sqrt(mean((dta[-train, 'price'] - predict(bag, dta[-train,]))^2))
+print(paste("Test RMSE:", bag.rmse))
+```
+
+The test RMSE is more than double of its training counterpart. Nonetheless, we can say we are pretty satisfied with the performance of the model. Moreover, we know this difference cannot be caused by overfitting, since bagging does not overfit even with large values of B. 
+
+\newpage
+
+# Random forest
+
+Bagging suffers from a well-known drawback: if among the explanatory variables we have a very strong predictor, the bagged trees will be very similar to one another, because all the trees will consider this predictor for most of their splits. This results in highly correlated predictions, which are then averaged; however, averaging correlated quantities leads to an increase in the variance, rather than to its decrease. 
+Random forest algorithm allows us to solve this issue by considering at each split only a random subset of the available predictors, so that in the end the trees will be different from one another and we will therefore obtain uncorrelated predictions, ultimately leading to better accuracy performance. 
+As done for bagging, we select the number of trees using OOB MSE estimate. 
+
+```{r rfLoop}
+rf.OOB.err <- NULL
+j <- 1
+#### WARNING ####
+#VERY LONG LOOP#
+
+for (i in seq(from=50, to=250, by=20)) {
+  set.seed(123)
+  rf <- randomForest(price ~ ., dta, mtry=4, ntree=i)
+  rf.OOB.err[j] <- mean((rf$predicted-dta[names(rf$predicted),'price'])^2)
+  j <- j+1
+}
+
+plot(seq(from=50, to=250, by=20), rf.OOB.err, type='b', 
+     xlab='Number of trees', ylab='OOB MSE')
+```
+
+Probably a random forest with 200 trees will be the optimal choice; however, to make a comparison with the bagged forest we grow a random forest of just 150 trees. In the end, there is not much difference in term of RMSE, as shown below. 
+
+```{r}
+names(rf.OOB.err) <- seq(from=50, to=250, by=20)
+sqrt(rf.OOB.err)
+
+set.seed(123)
+rf <- randomForest(price ~ ., dta[train,], mtry=4, ntree=150, importance=TRUE)
+
+rf.R2 <- R2(dta, rf, train)
+print('Model summary')
+print(paste('Pseudo R-squared:', rf.R2))
+print(paste('Training RMSE:', sqrt(mean((dta[train, 'price'] - predict(rf, dta[train,]))^2))))
+```
+
+The $R^2$ is slightly lower and the training RMSE is slightly larger than the one we obtained with bagging. However, we should not really worry about those training metrics, since what really matters are the performances on the test set. Before looking at them, we show a plot summarising the variables' importance for the random forest. 
+
+```{r}
+rf.importance <- as.data.frame(importance(rf))
+rf.importance$NormIncNodePurity <- (rf.importance$IncNodePurity/sum(rf.importance$IncNodePurity))*100
+
+ggplot(rf.importance,aes(x=reorder(rownames(rf.importance),NormIncNodePurity),y=NormIncNodePurity)) + 
+  geom_bar(stat="identity", fill="red",color="black") +
+  geom_text(aes(label=round(NormIncNodePurity,digits=2)), 
+            hjust=1, color="white", size=3) +
+  theme_minimal() + xlab("Variables") + coord_flip()
+```
+
+`carat` is still the most important variable, followed closely by `y`. Differently from bagging, `x` and `z` gained much importance, coherent with the fact that they are a sort of surrogate for the first two variables. `clarity` is still the most important predictor among the categorical ones, while again `depth` and `table` are really not relevant. 
+Finally, it is time to consider how the model behaves on an independent test set. 
+
+```{r}
+rf.rmse <- sqrt(mean((dta[-train, 'price'] - predict(rf, dta[-train,]))^2))
+print(paste('Test RMSE:', rf.rmse))
+```
+
+Random forest managed to get some improvement over bagging, even though bagging performance were already very good. Notice that this is coherent with the fact that also OOB MSE estimates were lower for random forest, as shown by the plot below. 
+
+```{r, fig.height=4}
+matplot(seq(from=50, to=250, by=20), 
+        cbind(bag.OOB.err,rf.OOB.err), 
+        type="b", pch=c(19,18), col=c("red","blue"), 
+        xlab="Nr of trees", ylab="OOB MSE")
+legend("topright", legend=c("Bagging","Random Forest"),pch=c(19,18), col=c("red","blue"))
+```
+
+# Conclusion
+
+We now summarize the performances of the models built so far, starting from the parametric ones. 
+
+```{r, fig.height=4}
+p.comp <- data.frame("Value" = c(summary(simple.lin)$adj.r.squared, simple.lin.mse,
+                               summary(simple.p3)$adj.r.squared, simple.p3.mse,
+                               summary(lin.reg)$adj.r.squared, lin.reg.mse, 
+                               summary(p3)$adj.r.squared, p3.mse), 
+                     'Models' = rep(c('Simple Linear', 
+                                   'Simple Polynomial',
+                                   'Multiple Linear', 
+                                   'Multiple Polynomial'), each=2), 
+                     "Measure" = rep(c('Adjusted Rsq', 'Test MSE'), 4), 
+                     "Complexity" = rep(1:4, each=2))
+
+
+ggplot(data=p.comp, aes(x=reorder(Models, Complexity), y=Value, fill=Measure)) +
+  geom_bar(stat="identity", color="black",position=position_dodge())+
+  geom_text(aes(label=round(Value,4)), vjust=-0.3,
+            position = position_dodge(0.9), size=3.5)+
+  scale_fill_brewer(palette="Set3")+ theme_minimal()  +
+  labs(title="Parametric models performance", subtitle='Log-scaled response') + xlab('')
+```
+
+Here the models were ordered according to their complexity, and we can see how the adjusted $R^2$ increases constantly. Notice how the simple and the multiple models have pairwise similar values, both for the $R^2$ and for the test MSE; on the contrary, models involving multiple predictors perform much better than the ones including just `carat`. 
+Before discussing the findings about non-parametric methods, it is worth recalling that, while linear and polynomial regressions were developed using log-transformed `price`, tree-based methods were using non-transformed target variable, so the numbers are really not comparable. Moreover, for the sake of a clear representation, the pseudo $R^2$ shown below is to be interpreted as a percentage. 
+
+```{r}
+np.comp <- data.frame("Value" = c(diamond.tree.rmse, tree.R2*100,
+                                  bag.rmse, bag.R2*100,
+                                  rf.rmse, rf.R2*100), 
+                     'Models' = rep(c('Simple Tree', 
+                                      'Bagging (150 trees)',
+                                      'Random Forest (150 trees)'), each=2), 
+                     "Measure" = rep(c('Test RMSE', 'Pseudo Rsq'), 3),
+                     'Order' = rep(1:3, each=2))
+
+ggplot(data=np.comp, aes(x=reorder(Models, Order), y=Value, fill=Measure)) + geom_bar(stat="identity",                                            color="black",position=position_dodge()) +
+  geom_text(aes(label=round(Value,2)), vjust=1.6,
+            position = position_dodge(0.9), size=3.5) +
+  scale_fill_brewer(palette="Set3")+ theme_minimal() + 
+  labs(title="Non-parametric models performance", subtitle='Response measured in USD') + xlab('')
+
+```
+
+As one could expect, the simple tree is really not competitive in terms of prediction with ensemble methods. The results about bagging and random forest are more interesting: while the former performs better on the training set (as shown by the pseudo $R^2$), the latter shows a smaller test RMSE. However, the two methods are really similar, and random forest prevails only by a little. 
+
+\newpage
+
+# Key findings 
+
+All the model analyzed in this paper pointed out the importance of carats in predicting our target variable, so we may say this is the most relevant factor in determining a diamond's price, together with the dimensions of the diamond in terms of width, length, and depth (the `z` variable). 
+However, weight and size are not the only relevant factors, as an important role is also played by the clarity of a diamond, followed by the color and the cut. On the contrary, the table and the depth (expressed as a percentage of the other two dimensions) are not relevant for a diamond's price. 
+
+##### Accuracy-interpretability trade-off.
+If we were interested only in accuracy, random forest would be the optimal choice among the analyzed algorithms. However, the model yielding the optimal trade-off between interpretability and prediction accuracy is probably the multiple linear regression. That model in fact allows us to draw some nice inferential hypotheses, such as:
+
+* An increase in 1% of diamond's carat leads, on average, to an increase of 1.88% in the price; 
+* After carat, the most influential predictor for a diamond price is its clarity, with the best-quality clarity diamond being evaluated approximately twice as much as the worst-quality clarity diamond, keeping all the other factors fixed; 
+* The best-quality color diamond cost, on average, $(e^{0.5}-1)100$% $\sim$ 66% more than the worst-quality color diamond, keeping all the other factors fixed;
+* The best-quality cut diamond cost, on average, $(e^{0.15}-1)100$% $\sim$ 17% more than the worst-quality cut diamond, keeping all the other factors fixed.
